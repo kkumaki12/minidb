@@ -19,10 +19,11 @@ type BufferID uint64
 
 // Buffer はメモリ上にキャッシュされたページを表す
 type Buffer struct {
-	PageID  disk.PageID // このバッファが保持しているページのID
-	Page    Page        // ページデータ本体
-	IsDirty bool        // ディスクに書き戻す必要があるか
-	refCount int        // 参照カウント（0なら evict 可能）
+	PageID   disk.PageID // このバッファが保持しているページのID
+	Page     Page        // ページデータ本体
+	IsDirty  bool        // ディスクに書き戻す必要があるか
+	refCount int         // 参照カウント（0なら evict 可能）
+	isValid  bool        // このバッファが有効なページを保持しているか
 }
 
 // Frame はバッファプール内の1スロットを表す
@@ -130,9 +131,10 @@ func (m *BufferPoolManager) FetchPage(pageID disk.PageID) (*Buffer, error) {
 
 	frame := &m.pool.frames[bufferID]
 	evictPageID := frame.Buffer.PageID
+	wasValid := frame.Buffer.isValid
 
 	// 古いバッファがdirtyなら書き戻す
-	if frame.Buffer.IsDirty {
+	if wasValid && frame.Buffer.IsDirty {
 		if err := m.disk.WritePageData(evictPageID, frame.Buffer.Page[:]); err != nil {
 			return nil, err
 		}
@@ -141,14 +143,17 @@ func (m *BufferPoolManager) FetchPage(pageID disk.PageID) (*Buffer, error) {
 	// 新しいページをディスクから読み込む
 	frame.Buffer.PageID = pageID
 	frame.Buffer.IsDirty = false
+	frame.Buffer.isValid = true
 	if err := m.disk.ReadPageData(pageID, frame.Buffer.Page[:]); err != nil {
 		return nil, err
 	}
 	frame.UsageCount = 1
 	frame.Buffer.refCount = 1
 
-	// ページテーブルを更新
-	delete(m.pageTable, evictPageID)
+	// ページテーブルを更新（有効だったバッファのみ削除）
+	if wasValid {
+		delete(m.pageTable, evictPageID)
+	}
 	m.pageTable[pageID] = bufferID
 
 	return frame.Buffer, nil
@@ -164,9 +169,10 @@ func (m *BufferPoolManager) CreatePage() (*Buffer, error) {
 
 	frame := &m.pool.frames[bufferID]
 	evictPageID := frame.Buffer.PageID
+	wasValid := frame.Buffer.isValid
 
 	// 古いバッファがdirtyなら書き戻す
-	if frame.Buffer.IsDirty {
+	if wasValid && frame.Buffer.IsDirty {
 		if err := m.disk.WritePageData(evictPageID, frame.Buffer.Page[:]); err != nil {
 			return nil, err
 		}
@@ -179,11 +185,14 @@ func (m *BufferPoolManager) CreatePage() (*Buffer, error) {
 	frame.Buffer.PageID = pageID
 	frame.Buffer.Page = Page{} // ゼロクリア
 	frame.Buffer.IsDirty = true // 新規作成なので dirty
+	frame.Buffer.isValid = true
 	frame.Buffer.refCount = 1
 	frame.UsageCount = 1
 
-	// ページテーブルを更新
-	delete(m.pageTable, evictPageID)
+	// ページテーブルを更新（有効だったバッファのみ削除）
+	if wasValid {
+		delete(m.pageTable, evictPageID)
+	}
 	m.pageTable[pageID] = bufferID
 
 	return frame.Buffer, nil
